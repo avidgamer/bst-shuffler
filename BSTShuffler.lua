@@ -127,9 +127,10 @@ local function BSTShuffler()
 				-- Update tracker display (force number type)
 				mon.bst = tonumber(new_bst)
 
-				-- Update actual game memory so battle stats match
-				local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
-				if Main.IsOnBizhawk() then
+				-- Only write to ROM for mons within the base Fire Red stats table
+				-- NatDex mons beyond index 411 have no ROM slot — writing causes memory warnings
+				if Main.IsOnBizhawk() and dex_index <= 411 then
+					local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
 					self.writeToROM(dex_index, hp, atk, def, spd, spatk, spdef)
 				end
 			end
