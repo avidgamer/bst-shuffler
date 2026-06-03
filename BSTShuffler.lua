@@ -41,8 +41,10 @@ local function BSTShuffler()
 
 		for i, mon in pairs(PokemonData.Pokemon) do
 			-- skip placeholder/empty entries
-			if mon and mon.bst and mon.bst > 0 then
-				table.insert(bst_pool, mon.bst)
+			-- tonumber() handles cases where bst is stored as a string
+			local bst_val = tonumber(mon and mon.bst)
+			if bst_val and bst_val > 0 then
+				table.insert(bst_pool, bst_val)
 				table.insert(indices, i)
 			end
 		end
@@ -122,8 +124,8 @@ local function BSTShuffler()
 			local mon     = PokemonData.Pokemon[dex_index]
 
 			if mon then
-				-- Update tracker display
-				mon.bst = new_bst
+				-- Update tracker display (force number type)
+				mon.bst = tonumber(new_bst)
 
 				-- Update actual game memory so battle stats match
 				local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
