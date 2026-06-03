@@ -1,51 +1,28 @@
 -- BSTShuffler.lua
 -- Ironmon Tracker Extension
--- Reads all mon BSTs from ROM memory at startup, shuffles the pool,
--- then freely redistributes stats — no shape preservation, matches
--- real randomizer methodology (floor: HP min 1, all others min 11)
+-- Shuffles BST values across all mons inside PokemonData directly
+-- This is what the tracker actually reads and displays
+-- Place in your extensions folder and enable in Settings > Extensions
 
 local function BSTShuffler()
 	local self = {
-		version      = "1.0.0",
-		name         = "BST Shuffler",
-		author       = "You",
-		description  = "Shuffles BST values across all mons at game start. Each run is unique.",
-		extensionKey = "BSTShuffler",       -- must match this filename exactly
-		requiredVersion = "v8.5.0",         -- minimum tracker version
+		version         = "1.0.1",
+		name            = "BST Shuffler",
+		author          = "You",
+		description     = "Shuffles BST values across all mons each run. Works on tracker display AND game memory.",
+		extensionKey    = "BSTShuffler",
+		requiredVersion = "v8.5.0",
+		hasShuffled     = false,
 
-		-- Fire Red base stats table in ROM
+		-- Fire Red ROM base stats table
+		-- Used to write shuffled stats back to actual game memory too
 		BASE_STATS_ADDR = 0x08254784,
 		ENTRY_SIZE      = 28,
-		TOTAL_MONS      = 1210,
-
-		-- Track whether shuffle has run this session
-		hasShuffled = false,
 	}
 
 	-- ============================================================
-	-- CORE SHUFFLE LOGIC
+	-- FISHER-YATES SHUFFLE
 	-- ============================================================
-
-	-- Read every mon's current BST and ROM address
-	function self.readAllBSTs()
-		local mons = {}
-		for i = 0, self.TOTAL_MONS - 1 do
-			local base  = self.BASE_STATS_ADDR + (i * self.ENTRY_SIZE)
-			local hp    = memory.read_u8(base + 0)
-			local atk   = memory.read_u8(base + 1)
-			local def   = memory.read_u8(base + 2)
-			local spd   = memory.read_u8(base + 3)
-			local spatk = memory.read_u8(base + 4)
-			local spdef = memory.read_u8(base + 5)
-			mons[i + 1] = {
-				addr = base,
-				bst  = hp + atk + def + spd + spatk + spdef,
-			}
-		end
-		return mons
-	end
-
-	-- Fisher-Yates shuffle — every permutation equally likely
 	function self.shuffle(t)
 		for i = #t, 2, -1 do
 			local j = math.random(i)
@@ -54,113 +31,131 @@ local function BSTShuffler()
 		return t
 	end
 
-	-- Freely distribute a BST across 6 stats using random cut points
-	-- Matches real randomizer behavior:
-	--   HP floor  = 1
-	--   All other stat floors = 11
-	--   Hard cap at 255 per stat
-	function self.distributeStats(bst)
-		local FLOORS     = { 1, 11, 11, 11, 11, 11 }
-		local floor_total = 0
-		for _, f in ipairs(FLOORS) do
-			floor_total = floor_total + f
+	-- ============================================================
+	-- STEP 1: Collect all BST values from PokemonData
+	-- This is what the tracker actually reads — not ROM memory
+	-- ============================================================
+	function self.collectBSTs()
+		local bst_pool = {}
+		local indices  = {}
+
+		for i, mon in pairs(PokemonData.Pokemon) do
+			-- skip placeholder/empty entries
+			if mon and mon.bst and mon.bst > 0 then
+				table.insert(bst_pool, mon.bst)
+				table.insert(indices, i)
+			end
 		end
+
+		return bst_pool, indices
+	end
+
+	-- ============================================================
+	-- STEP 2: Freely distribute a BST into 6 individual stats
+	-- Matches real randomizer methodology:
+	--   HP floor  = 1, all others floor = 11, cap at 255
+	-- ============================================================
+	function self.distributeStats(bst)
+		local FLOORS      = { 1, 11, 11, 11, 11, 11 }
+		local floor_total = 0
+		for _, f in ipairs(FLOORS) do floor_total = floor_total + f end
 
 		local remaining = math.max(0, bst - floor_total)
 
-		-- Place 5 random cut points across [0, remaining]
-		-- then sort to get 6 random segments that sum to remaining
+		-- 5 random cut points across [0, remaining] -> 6 segments
 		local cuts = {}
-		for i = 1, 5 do
-			cuts[i] = math.random(0, remaining)
-		end
+		for i = 1, 5 do cuts[i] = math.random(0, remaining) end
 		table.sort(cuts)
 
 		local allocs = {}
 		allocs[1] = cuts[1]
-		for i = 2, 5 do
-			allocs[i] = cuts[i] - cuts[i - 1]
-		end
+		for i = 2, 5 do allocs[i] = cuts[i] - cuts[i - 1] end
 		allocs[6] = remaining - cuts[5]
 
-		-- Add floors back, cap each stat at 255
 		local stats = {}
 		for i = 1, 6 do
 			stats[i] = math.min(255, FLOORS[i] + allocs[i])
 		end
 
-		-- stats order: HP, ATK, DEF, SPD, SPATK, SPDEF
+		-- returns: hp, atk, def, spd, spatk, spdef
 		return stats[1], stats[2], stats[3], stats[4], stats[5], stats[6]
 	end
 
-	-- Write the 6 stats back to ROM memory for a mon
-	function self.writeStats(addr, hp, atk, def, spd, spatk, spdef)
-		memory.write_u8(addr + 0, hp)
-		memory.write_u8(addr + 1, atk)
-		memory.write_u8(addr + 2, def)
-		memory.write_u8(addr + 3, spd)
-		memory.write_u8(addr + 4, spatk)
-		memory.write_u8(addr + 5, spdef)
+	-- ============================================================
+	-- STEP 3: Write stats to ROM memory so the game uses them too
+	-- ============================================================
+	function self.writeToROM(dex_index, hp, atk, def, spd, spatk, spdef)
+		-- dex_index is 1-based, ROM table is 0-based
+		local base = self.BASE_STATS_ADDR + ((dex_index - 1) * self.ENTRY_SIZE)
+		memory.write_u8(base + 0, hp)
+		memory.write_u8(base + 1, atk)
+		memory.write_u8(base + 2, def)
+		memory.write_u8(base + 3, spd)
+		memory.write_u8(base + 4, spatk)
+		memory.write_u8(base + 5, spdef)
 	end
 
-	-- Main shuffle routine — runs once per startup
+	-- ============================================================
+	-- MAIN SHUFFLE ROUTINE
+	-- ============================================================
 	function self.runShuffle()
-		if self.hasShuffled then
-			return
-		end
+		if self.hasShuffled then return end
 
 		math.randomseed(os.time())
 
-		print("[BSTShuffler] Reading all BSTs from ROM...")
-		local mons = self.readAllBSTs()
+		-- Collect BST pool from tracker's internal PokemonData
+		local bst_pool, indices = self.collectBSTs()
+		local total = #bst_pool
 
-		-- Pull all BST values into a flat pool
-		local bst_pool = {}
-		for _, m in ipairs(mons) do
-			table.insert(bst_pool, m.bst)
+		if total == 0 then
+			print("[BSTShuffler] ERROR: PokemonData not ready yet.")
+			return
 		end
 
-		-- Shuffle the pool
+		-- Shuffle the BST pool
 		self.shuffle(bst_pool)
-		print(string.format("[BSTShuffler] Pool of %d BSTs shuffled.", #bst_pool))
+		print(string.format("[BSTShuffler] Shuffling %d BST values...", total))
 
-		-- Redistribute: each mon gets a random BST from the pool
-		-- stats freely distributed within that BST
-		for i, mon in ipairs(mons) do
-			local new_bst                       = bst_pool[i]
-			local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
-			self.writeStats(mon.addr, hp, atk, def, spd, spatk, spdef)
+		-- Apply shuffled BSTs back into PokemonData AND ROM memory
+		for i, dex_index in ipairs(indices) do
+			local new_bst = bst_pool[i]
+			local mon     = PokemonData.Pokemon[dex_index]
+
+			if mon then
+				-- Update tracker display
+				mon.bst = new_bst
+
+				-- Update actual game memory so battle stats match
+				local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
+				if Main.IsOnBizhawk() then
+					self.writeToROM(dex_index, hp, atk, def, spd, spatk, spdef)
+				end
+			end
 		end
 
 		self.hasShuffled = true
-		print(string.format("[BSTShuffler] Done. %d mons updated with shuffled BSTs.", self.TOTAL_MONS))
+		print(string.format("[BSTShuffler] Done. %d mons updated.", total))
 	end
 
 	-- ============================================================
 	-- TRACKER EXTENSION HOOKS
 	-- ============================================================
 
-	-- Called once when the extension is enabled or tracker starts
+	-- Runs once after tracker loads all data including NatDex extension
+	-- Because extensions run after PokemonData.buildData() this timing is correct
 	function self.startup()
-		-- Verify tracker version is compatible
-		if not (Main and Main.IsOnBizhawk and Main.IsOnBizhawk()) then
-			print("[BSTShuffler] Warning: Not running on BizHawk. Memory writes unavailable.")
-			return
-		end
-
+		-- Must be on BizHawk for memory writes
+		-- Display shuffle still works on mGBA (just skips ROM write)
 		self.runShuffle()
 	end
 
-	-- Called when the user disables the extension
-	-- We cannot undo memory writes after the fact, so we just notify
 	function self.unload()
-		print("[BSTShuffler] Extension unloaded. Restart the tracker to get a fresh shuffle.")
 		self.hasShuffled = false
+		print("[BSTShuffler] Unloaded. Restart tracker for a fresh shuffle.")
 	end
 
-	-- Optional: hook for tracker update checks (can be left empty)
 	function self.checkForUpdates()
-		-- no update server for this extension
+		-- no update server
 	end
 
 	return self
