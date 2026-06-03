@@ -14,10 +14,10 @@ local function BSTShuffler()
 		requiredVersion = "v8.5.0",
 		hasShuffled     = false,
 
-		-- Fire Red ROM base stats table
+		-- NatDex ROM base stats table (gSpeciesInfo) covers all 1235 entries
 		-- Used to write shuffled stats back to actual game memory too
-		BASE_STATS_ADDR = 0x08254784,
-		ENTRY_SIZE      = 28,
+		BASE_STATS_ADDR = 0x0826a5fc,  -- NatDex gSpeciesInfo, all 1235 entries incl. Megas/regionals/alt forms
+		ENTRY_SIZE      = 0x54,         -- 84 bytes per gSpeciesInfo entry
 	}
 
 	-- ============================================================
@@ -59,24 +59,72 @@ local function BSTShuffler()
 	-- ============================================================
 	function self.distributeStats(bst)
 		local FLOORS      = { 1, 11, 11, 11, 11, 11 }
+		local CAP         = 255
 		local floor_total = 0
 		for _, f in ipairs(FLOORS) do floor_total = floor_total + f end
 
-		local remaining = math.max(0, bst - floor_total)
+		-- Max possible BST with 6 stats all at 255
+		local max_possible = CAP * 6
+		local target = math.min(bst, max_possible)
+		local remaining = math.max(0, target - floor_total)
 
-		-- 5 random cut points across [0, remaining] -> 6 segments
-		local cuts = {}
-		for i = 1, 5 do cuts[i] = math.random(0, remaining) end
-		table.sort(cuts)
-
-		local allocs = {}
-		allocs[1] = cuts[1]
-		for i = 2, 5 do allocs[i] = cuts[i] - cuts[i - 1] end
-		allocs[6] = remaining - cuts[5]
-
+		-- Initialize all stats at their floor
 		local stats = {}
-		for i = 1, 6 do
-			stats[i] = math.min(255, FLOORS[i] + allocs[i])
+		for i = 1, 6 do stats[i] = FLOORS[i] end
+
+		-- Keep distributing until all points are placed
+		-- If a stat hits 255 the overflow gets redistributed to others
+		local points_left = remaining
+		local iterations  = 0
+		while points_left > 0 and iterations < 1000 do
+			iterations = iterations + 1
+
+			-- Find stats that still have room below cap
+			local available = {}
+			for i = 1, 6 do
+				if stats[i] < CAP then
+					table.insert(available, i)
+				end
+			end
+
+			if #available == 0 then break end
+
+			-- Use cut point method on the remaining points across available slots
+			local cuts = {}
+			for i = 1, #available - 1 do
+				cuts[i] = math.random(0, points_left)
+			end
+			table.sort(cuts)
+
+			local allocs = {}
+			if #available == 1 then
+				allocs[1] = points_left
+			else
+				allocs[1] = cuts[1]
+				for i = 2, #available - 1 do
+					allocs[i] = cuts[i] - cuts[i - 1]
+				end
+				allocs[#available] = points_left - cuts[#available - 1]
+			end
+
+			-- Apply allocations, cap at 255, track overflow
+			points_left = 0
+			for j, idx in ipairs(available) do
+				local new_val = stats[idx] + allocs[j]
+				if new_val > CAP then
+					points_left = points_left + (new_val - CAP)
+					stats[idx]  = CAP
+				else
+					stats[idx]  = new_val
+				end
+			end
+		end
+
+		-- Verify total matches — debug print if off
+		local total = 0
+		for i = 1, 6 do total = total + stats[i] end
+		if total ~= target then
+			print(string.format("[BSTShuffler] WARNING: target %d got %d (diff %d)", target, total, target - total))
 		end
 
 		-- returns: hp, atk, def, spd, spatk, spdef
@@ -128,8 +176,7 @@ local function BSTShuffler()
 				mon.bst = tonumber(new_bst)
 
 				-- Only write to ROM for mons within the base Fire Red stats table
-				-- NatDex mons beyond index 411 have no ROM slot — writing causes memory warnings
-				if Main.IsOnBizhawk() and dex_index <= 411 then
+				if Main.IsOnBizhawk() then  -- all 1235 entries are in gSpeciesInfo table
 					local hp, atk, def, spd, spatk, spdef = self.distributeStats(new_bst)
 					self.writeToROM(dex_index, hp, atk, def, spd, spatk, spdef)
 				end
